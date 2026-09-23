@@ -143,7 +143,7 @@ jobs:
           echo "=== libapp.so storage references ===" \
             >> work/report/storage-analysis.txt
 
-          find work/decoded/lib \
+          find work/decoded \
             -type f \
             -name 'libapp.so' \
             -print0 |
@@ -186,6 +186,26 @@ jobs:
             4 \
             work/Aetherwave-debug-unsigned.apk \
             work/Aetherwave-debug.apk
+
+      - name: Create debug keystore
+        run: |
+          set -e
+
+          mkdir -p "$HOME/.android"
+
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          test -f "$HOME/.android/debug.keystore"
 
       - name: Sign debug APK
         run: |
