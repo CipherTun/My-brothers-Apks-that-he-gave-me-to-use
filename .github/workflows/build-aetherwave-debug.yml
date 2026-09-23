@@ -1,0 +1,219 @@
+name: Build Aetherwave Debug APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate base APK ZIP
+        run: |
+          set -e
+
+          mkdir -p work/input
+
+          FILE="$(find . -type f -iname '*.zip' -print \
+            | grep -Ei 'The base Apk to use|base.*zip' \
+            | head -1)"
+
+          if [ -z "$FILE" ]; then
+            echo "ERROR: Base APK ZIP not found."
+            find . -type f -iname '*.zip' -print
+            exit 1
+          fi
+
+          echo "Using: $FILE"
+
+          unzip -q "$FILE" -d work/input
+
+          APK="$(find work/input -type f -name 'base.apk' -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: base.apk not found inside ZIP."
+            exit 1
+          fi
+
+          cp "$APK" work/base.apk
+
+          echo "Base APK:"
+          ls -lh work/base.apk
+
+      - name: Install Apktool
+        run: |
+          curl -fsSL \
+            -o /tmp/apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v3.0.2/apktool_3.0.2.jar
+
+      - name: Decode base APK
+        run: |
+          set -e
+
+          java -jar /tmp/apktool.jar d \
+            -f \
+            work/base.apk \
+            -o work/decoded
+
+      - name: Apply Aetherwave identity
+        run: |
+          set -e
+
+          OLD='com.tubemusicdown.musictubedownallmusicdownolder'
+          NEW='com.ciphertun.aetherwave'
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path("work/decoded")
+
+          old = "com.tubemusicdown.musictubedownallmusicdownolder"
+          new = "com.ciphertun.aetherwave"
+
+          for p in root.rglob("*"):
+              if not p.is_file():
+                  continue
+
+              if p.suffix.lower() not in {
+                  ".xml",
+                  ".smali",
+                  ".json",
+                  ".txt"
+              }:
+                  continue
+
+              try:
+                  data = p.read_text(errors="ignore")
+                  changed = data.replace(old, new)
+                  changed = changed.replace(
+                      "Music Downloader",
+                      "Aetherwave"
+                  )
+
+                  if changed != data:
+                      p.write_text(changed)
+              except Exception:
+                  pass
+          PY
+
+      - name: Verify Aetherwave identity
+        run: |
+          set -e
+
+          echo "=== Manifest package ==="
+          grep -Rni \
+            'com.ciphertun.aetherwave' \
+            work/decoded/AndroidManifest.xml
+
+          echo
+          echo "=== Checking old package ==="
+
+          if grep -Rni \
+            'com.tubemusicdown.musictubedownallmusicdownolder' \
+            work/decoded/AndroidManifest.xml; then
+            echo "ERROR: Old package still exists in manifest."
+            exit 1
+          fi
+
+          echo
+          echo "Identity verification passed."
+
+      - name: Inspect existing download/storage implementation
+        run: |
+          mkdir -p work/report
+
+          echo "=== Android-side storage references ===" \
+            > work/report/storage-analysis.txt
+
+          grep -RniE \
+            'Download/|Music/|/storage/|MediaStore|FileOutputStream|RandomAccessFile|externalFilesDir' \
+            work/decoded \
+            >> work/report/storage-analysis.txt || true
+
+          echo \
+            >> work/report/storage-analysis.txt
+
+          echo "=== libapp.so storage references ===" \
+            >> work/report/storage-analysis.txt
+
+          find work/decoded/lib \
+            -type f \
+            -name 'libapp.so' \
+            -print0 |
+          while IFS= read -r -d '' f; do
+            echo
+            echo "FILE: $f"
+
+            strings -a "$f" |
+              grep -Ei \
+              '/storage/|Download/|Music/|\.mp3|\.m4a|\.flac|MediaStore' \
+              | head -1000 || true
+          done \
+          >> work/report/storage-analysis.txt
+
+          echo
+          echo "Storage analysis generated."
+
+      - name: Rebuild APK
+        run: |
+          set -e
+
+          java -jar /tmp/apktool.jar b \
+            work/decoded \
+            -o work/Aetherwave-debug-unsigned.apk
+
+      - name: Align APK
+        run: |
+          set -e
+
+          BT="$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | sort -V \
+            | tail -1)"
+
+          "$BT/zipalign" \
+            -f \
+            -p \
+            4 \
+            work/Aetherwave-debug-unsigned.apk \
+            work/Aetherwave-debug.apk
+
+      - name: Sign debug APK
+        run: |
+          set -e
+
+          BT="$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | sort -V \
+            | tail -1)"
+
+          "$BT/apksigner" sign \
+            --ks "$HOME/.android/debug.keystore" \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            work/Aetherwave-debug.apk
+
+          "$BT/apksigner" verify \
+            --verbose \
+            work/Aetherwave-debug.apk
+
+      - name: Upload Aetherwave debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aetherwave-debug
+          path: |
+            work/Aetherwave-debug.apk
+            work/report/storage-analysis.txt
+          retention-days: 7
