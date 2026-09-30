@@ -10,69 +10,82 @@ jobs:
   decompile:
     name: Decompile APK packages
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install tools
+      - name: Install decompilation tools
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
           sudo apt-get update
-          sudo apt-get install -y unzip zip jq wget aapt
+          sudo apt-get install -y unzip zip jq aapt
 
-          JADX_URL="$(
-            curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest |
-            jq -r '.assets[] | select(.name | test("^jadx-[0-9.]+\\.zip$")) | .browser_download_url' |
-            head -n 1
-          )"
+          mkdir -p "$RUNNER_TEMP/tools"
 
-          test -n "$JADX_URL"
+          # JADX 1.5.6
+          curl -fL \
+            "https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip" \
+            -o "$RUNNER_TEMP/jadx.zip"
 
-          mkdir -p "$RUNNER_TEMP/tools/jadx"
-          curl -fL "$JADX_URL" -o "$RUNNER_TEMP/jadx.zip"
-          unzip -q "$RUNNER_TEMP/jadx.zip" -d "$RUNNER_TEMP/tools/jadx"
+          unzip -q "$RUNNER_TEMP/jadx.zip" \
+            -d "$RUNNER_TEMP/tools/jadx"
 
-          APKTOOL_URL="$(
-            curl -fsSL https://api.github.com/repos/iBotPeaches/Apktool/releases/latest |
-            jq -r '.assets[] | select(.name == "apktool.jar") | .browser_download_url' |
-            head -n 1
-          )"
+          JADX_BIN="$RUNNER_TEMP/tools/jadx/bin/jadx"
 
-          test -n "$APKTOOL_URL"
-
-          curl -fL "$APKTOOL_URL" -o "$RUNNER_TEMP/apktool.jar"
-
-          JADX_BIN="$(find "$RUNNER_TEMP/tools/jadx" -type f -path '*/bin/jadx' | head -n 1)"
-
-          test -n "$JADX_BIN"
-
-          chmod +x "$JADX_BIN"
+          test -x "$JADX_BIN"
 
           echo "JADX_BIN=$JADX_BIN" >> "$GITHUB_ENV"
-          echo "APKTOOL_JAR=$RUNNER_TEMP/apktool.jar" >> "$GITHUB_ENV"
 
           "$JADX_BIN" --version
+
+          # Apktool 3.0.2
+          curl -fL \
+            "https://github.com/iBotPeaches/Apktool/releases/download/v3.0.2/apktool_3.0.2.jar" \
+            -o "$RUNNER_TEMP/apktool.jar"
+
+          test -s "$RUNNER_TEMP/apktool.jar"
+
+          echo "APKTOOL_JAR=$RUNNER_TEMP/apktool.jar" >> "$GITHUB_ENV"
+
           java -jar "$RUNNER_TEMP/apktool.jar" --version
 
-      - name: Extract original ZIP packages
+      - name: Extract original APK ZIPs
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
           mkdir -p work/apps
 
-          unzip -q "Apk 1.zip" -d "work/apps/apk1"
-          unzip -q "Apk 2.zip" -d "work/apps/apk2"
-          unzip -q "The base apk to use.zip" -d "work/apps/base"
+          unzip -q "Apk 1.zip" \
+            -d "work/apps/apk1"
 
-          find work/apps -type f -name '*.apk' -print | sort > work/all-apks.txt
+          unzip -q "Apk 2.zip" \
+            -d "work/apps/apk2"
 
-          echo "APK files found:"
+          unzip -q "The base apk to use.zip" \
+            -d "work/apps/base"
+
+          find work/apps \
+            -type f \
+            -name "*.apk" \
+            -print \
+            | sort \
+            > work/all-apks.txt
+
+          echo
+          echo "APK FILES FOUND:"
           cat work/all-apks.txt
+
+          COUNT="$(wc -l < work/all-apks.txt)"
+
+          echo
+          echo "APK COUNT: $COUNT"
+
+          test "$COUNT" -ge 3
 
       - name: Inspect APK metadata
         shell: bash
@@ -82,51 +95,91 @@ jobs:
           mkdir -p analysis/metadata
 
           while IFS= read -r apk; do
-            safe="$(echo "$apk" | sed 's#[/ ]#_#g; s#\.apk$##')"
+
+            safe="$(echo "$apk" |
+              sed 's#[/ ]#_#g; s#\.apk$##')"
 
             {
               echo "============================================================"
-              echo "FILE: $apk"
+              echo "APK: $apk"
               echo "============================================================"
+
+              echo
+              echo "SHA256:"
               sha256sum "$apk"
-              stat -c 'SIZE_BYTES=%s' "$apk"
+
               echo
-              echo "----- aapt dump badging -----"
+              echo "SIZE:"
+              stat -c "%s bytes" "$apk"
+
+              echo
+              echo "AAPT BADGING:"
               aapt dump badging "$apk" || true
+
               echo
-              echo "----- aapt permissions -----"
+              echo "AAPT PERMISSIONS:"
               aapt dump permissions "$apk" || true
+
             } > "analysis/metadata/$safe.txt"
+
           done < work/all-apks.txt
 
-      - name: Decompile every APK
+      - name: Decompile APKs with JADX
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
 
-          mkdir -p analysis/jadx analysis/apktool
+          mkdir -p analysis/jadx
 
           while IFS= read -r apk; do
-            safe="$(echo "$apk" | sed 's#[/ ]#_#g; s#\.apk$##')"
 
+            safe="$(echo "$apk" |
+              sed 's#[/ ]#_#g; s#\.apk$##')"
+
+            echo
             echo "============================================================"
-            echo "Decompiling $apk"
+            echo "JADX: $apk"
             echo "============================================================"
+
+            mkdir -p "analysis/jadx/$safe"
 
             "$JADX_BIN" \
               --deobf \
               --show-bad-code \
               --no-res \
+              --log-level error \
               -d "analysis/jadx/$safe" \
-              "$apk" || true
+              "$apk" \
+              2>&1 | tee "analysis/jadx/$safe/jadx.log" || true
 
-            java -jar "$APKTOOL_JAR" d \
-              -f \
-              -o "analysis/apktool/$safe" \
-              "$apk" || true
           done < work/all-apks.txt
 
-      - name: Build detailed feature report
+      - name: Decode APK resources with Apktool
+        shell: bash
+        run: |
+          set -u
+
+          mkdir -p analysis/apktool
+
+          while IFS= read -r apk; do
+
+            safe="$(echo "$apk" |
+              sed 's#[/ ]#_#g; s#\.apk$##')"
+
+            echo
+            echo "============================================================"
+            echo "APKTOOL: $apk"
+            echo "============================================================"
+
+            java -jar "$APKTOOL_JAR" d \
+              --force \
+              --output "analysis/apktool/$safe" \
+              "$apk" \
+              2>&1 | tee "analysis/apktool/$safe.log" || true
+
+          done < work/all-apks.txt
+
+      - name: Generate detailed analysis report
         shell: bash
         run: |
           set -euo pipefail
@@ -134,71 +187,130 @@ jobs:
           REPORT="analysis/BROTHER_APPS_DETAILED_REPORT.txt"
 
           {
-            echo "AETHERWAVE BROTHER APPS - DETAILED REPORT"
-            echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "AETHERWAVE BROTHER APPS"
+            echo "DETAILED APK ANALYSIS"
             echo
-            echo "These are decompiled representations of compiled APKs."
-            echo "They are not the original source projects."
+            echo "Generated:"
+            date -u
             echo
-
             echo "============================================================"
             echo "APK INVENTORY"
             echo "============================================================"
             cat work/all-apks.txt
-            echo
 
+            echo
             echo "============================================================"
-            echo "PACKAGE / LABEL / SDK / COMPONENTS"
+            echo "PACKAGE / APPLICATION / SDK"
             echo "============================================================"
+
             grep -RniE \
-              'package=|android:label=|android:minSdkVersion|android:targetSdkVersion|<activity|<service|<receiver|<provider' \
-              analysis/apktool 2>/dev/null |
-              head -n 5000 || true
-            echo
+              'package=|android:label=|android:minSdkVersion|android:targetSdkVersion' \
+              analysis/apktool \
+              2>/dev/null \
+              | head -n 10000 || true
 
+            echo
+            echo "============================================================"
+            echo "ACTIVITIES / SERVICES / RECEIVERS / PROVIDERS"
+            echo "============================================================"
+
+            grep -RniE \
+              '<activity|<service|<receiver|<provider' \
+              analysis/apktool \
+              2>/dev/null \
+              | head -n 15000 || true
+
+            echo
+            echo "============================================================"
+            echo "PERMISSIONS"
+            echo "============================================================"
+
+            grep -RniE \
+              'uses-permission|permission' \
+              analysis/apktool \
+              2>/dev/null \
+              | head -n 15000 || true
+
+            echo
             echo "============================================================"
             echo "NETWORK / API / URLS"
             echo "============================================================"
+
             grep -RhoE \
-              'https?://[^"<> ]+|wss?://[^"<> ]+' \
-              analysis/jadx analysis/apktool 2>/dev/null |
-              sort -u |
-              head -n 5000 || true
-            echo
+              'https?://[^"<>[:space:]]+|wss?://[^"<>[:space:]]+' \
+              analysis/jadx \
+              analysis/apktool \
+              2>/dev/null \
+              | sort -u \
+              | head -n 10000 || true
 
+            echo
             echo "============================================================"
-            echo "DOWNLOAD / MEDIA / STORAGE"
+            echo "MUSIC / DOWNLOAD / STORAGE"
             echo "============================================================"
+
             grep -RniE \
-              'download|MediaStore|RELATIVE_PATH|Music/|Environment\.DIRECTORY_MUSIC|contentResolver|OutputStream|FileOutputStream|DownloadManager|MediaMetadataRetriever|MediaPlayer|ExoPlayer|audio|mp3|m4a|aac|flac|ogg|wav' \
-              analysis/jadx analysis/apktool 2>/dev/null |
-              head -n 10000 || true
-            echo
+              'download|DownloadManager|MediaStore|RELATIVE_PATH|DIRECTORY_MUSIC|contentResolver|FileOutputStream|OutputStream|Music/|mp3|m4a|aac|flac|ogg|wav|audio|MediaPlayer|ExoPlayer' \
+              analysis/jadx \
+              analysis/apktool \
+              2>/dev/null \
+              | head -n 20000 || true
 
+            echo
             echo "============================================================"
-            echo "FEATURE / UI / NAVIGATION"
+            echo "MUSIC SOURCES / SEARCH"
             echo "============================================================"
+
             grep -RniE \
-              'search|home|library|playlist|favorite|favourite|history|settings|album|artist|song|track|queue|lyrics|notification|share|equalizer|theme|dark|night|sleep|offline|background|player|music' \
-              analysis/jadx analysis/apktool 2>/dev/null |
-              head -n 15000 || true
-            echo
+              'search|query|youtube|soundcloud|spotify|jamendo|audiomack|deezer|itunes|podcast|musicbrainz|lastfm|stream|source|catalog' \
+              analysis/jadx \
+              analysis/apktool \
+              2>/dev/null \
+              | head -n 25000 || true
 
+            echo
             echo "============================================================"
-            echo "LIBRARIES / PACKAGES"
+            echo "PLAYER / QUEUE / PLAYLIST"
             echo "============================================================"
-            grep -RhoE \
-              '([A-Za-z0-9_-]+\.){2,}[A-Za-z0-9_$-]+' \
-              analysis/jadx 2>/dev/null |
-              sort -u |
-              head -n 10000 || true
+
+            grep -RniE \
+              'player|playback|queue|playlist|favorite|favourite|history|repeat|shuffle|lyrics|album|artist|track|song' \
+              analysis/jadx \
+              analysis/apktool \
+              2>/dev/null \
+              | head -n 25000 || true
+
+            echo
+            echo "============================================================"
+            echo "UI / NAVIGATION / SETTINGS"
+            echo "============================================================"
+
+            grep -RniE \
+              'home|library|settings|navigation|drawer|menu|theme|dark|night|notification|share|equalizer|offline|background' \
+              analysis/jadx \
+              analysis/apktool \
+              2>/dev/null \
+              | head -n 25000 || true
+
+            echo
+            echo "============================================================"
+            echo "NATIVE LIBRARIES"
+            echo "============================================================"
+
+            find work/apps \
+              -type f \
+              \( -name "*.so" -o -name "*.dex" \) \
+              -print \
+              | sort || true
 
           } > "$REPORT"
 
+          echo
+          echo "REPORT:"
           wc -l "$REPORT"
           wc -c "$REPORT"
 
-      - name: Package inspection artifact
+      - name: Create inspection package
         shell: bash
         run: |
           set -euo pipefail
@@ -206,32 +318,49 @@ jobs:
           mkdir -p final-artifact
 
           cp -r analysis final-artifact/
-          cp work/all-apks.txt final-artifact/ORIGINAL_APK_INVENTORY.txt
+          cp work/all-apks.txt \
+            final-artifact/ORIGINAL_APK_INVENTORY.txt
 
           cat > final-artifact/README.txt <<'EOF'
-          Aetherwave Brother Apps Decompiled Inspection
+          AETHERWAVE BROTHER APP INSPECTION
 
-          Contains:
+          The original APK ZIP files in the repository were not modified.
+
+          This inspection contains:
+
           - APK metadata
-          - decoded Android manifests/resources
-          - JADX decompiled source
+          - package/application information
+          - permissions
+          - activities/services/receivers/providers
+          - decoded Android resources
+          - decompiled Java source
           - API/network references
-          - download/media/storage references
-          - UI/features/navigation references
-          - library/package references
+          - music sources
+          - download implementation references
+          - storage implementation references
+          - player/queue/playlist references
+          - UI/navigation/settings references
+          - native library inventory
 
-          The original ZIP files were not modified.
-
-          Decompiled code is reconstructed from compiled APKs and may not
-          exactly match the original source code.
+          JADX/Apktool output is reconstructed from compiled APKs.
+          It is not the original source code.
           EOF
 
           cd final-artifact
-          zip -qr ../aetherwave-brother-apps-decompiled-inspection.zip .
+
+          zip -qr \
+            ../aetherwave-brother-apps-decompiled-inspection.zip \
+            .
+
           cd ..
 
-          sha256sum aetherwave-brother-apps-decompiled-inspection.zip
-          ls -lh aetherwave-brother-apps-decompiled-inspection.zip
+          echo
+          echo "FINAL ARTIFACT:"
+          ls -lh \
+            aetherwave-brother-apps-decompiled-inspection.zip
+
+          sha256sum \
+            aetherwave-brother-apps-decompiled-inspection.zip
 
       - name: Upload inspection artifact
         uses: actions/upload-artifact@v4
