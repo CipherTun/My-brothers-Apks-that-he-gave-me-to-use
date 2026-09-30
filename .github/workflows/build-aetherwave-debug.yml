@@ -62,6 +62,79 @@ jobs:
             work/base.apk \
             -o work/decoded
 
+      - name: Restore native libraries from APK splits
+        run: |
+          set -e
+
+          mkdir -p work/native
+
+          echo "=== APK splits ==="
+          find work/input -type f -name '*.apk' -print | sort
+
+          echo
+          echo "=== Extracting native libraries ==="
+
+          find work/input -type f -name '*.apk' -print0 |
+          while IFS= read -r -d '' apk; do
+
+            unzip -l "$apk" |
+              awk '/lib\/[^ ]+\/[^ ]+\.so$/ {print $4}' |
+              while IFS= read -r lib; do
+
+                [ -n "$lib" ] || continue
+
+                abi="$(printf '%s\n' "$lib" | cut -d/ -f2)"
+                name="$(printf '%s\n' "$lib" | cut -d/ -f3)"
+
+                mkdir -p "work/native/$abi"
+
+                unzip -p "$apk" "$lib" \
+                  > "work/native/$abi/$name"
+
+              done
+
+          done
+
+          echo
+          echo "=== Recovered native libraries ==="
+
+          find work/native \
+            -type f \
+            -name '*.so' \
+            -print | sort
+
+          test "$(find work/native -type f -name '*.so' | wc -l)" -gt 0
+
+          echo
+          echo "=== Restoring libraries into decoded APK ==="
+
+          find work/native \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            -print0 |
+          while IFS= read -r -d '' abi_dir; do
+
+            abi="$(basename "$abi_dir")"
+
+            mkdir -p "work/decoded/lib/$abi"
+
+            cp -f \
+              "$abi_dir"/*.so \
+              "work/decoded/lib/$abi/"
+
+          done
+
+          echo
+          echo "=== Final decoded native libraries ==="
+
+          find work/decoded/lib \
+            -type f \
+            -name '*.so' \
+            -print | sort
+
+          test "$(find work/decoded/lib -type f -name '*.so' | wc -l)" -gt 0
+
       - name: Apply Aetherwave identity
         run: |
           set -e
@@ -102,6 +175,81 @@ jobs:
               except Exception:
                   pass
           PY
+
+      - name: Remove Android advertising integrations
+        run: |
+          set -e
+
+          python3 <<'PY2'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          path = Path("work/decoded/AndroidManifest.xml")
+
+          ANDROID = "http://schemas.android.com/apk/res/android"
+
+          ET.register_namespace("android", ANDROID)
+
+          tree = ET.parse(path)
+          root = tree.getroot()
+
+          def android_name(element):
+              return element.get(
+                  f"{{{ANDROID}}}name",
+                  ""
+              )
+
+          # Remove advertising ID permissions.
+          for child in list(root):
+
+              if child.tag != "uses-permission":
+                  continue
+
+              name = android_name(child)
+
+              if name in {
+                  "android.permission.AD_ID",
+                  "com.google.android.gms.permission.AD_ID",
+              }:
+                  root.remove(child)
+
+          # Remove explicit ad metadata.
+          application = root.find("application")
+
+          if application is not None:
+
+              for child in list(application):
+
+                  if child.tag != "meta-data":
+                      continue
+
+                  name = android_name(child).lower()
+
+                  if any(term in name for term in (
+                      "admob",
+                      "ad_manager",
+                      "applovin",
+                      "facebook_ads",
+                      "audience_network",
+                  )):
+                      application.remove(child)
+
+          tree.write(
+              path,
+              encoding="utf-8",
+              xml_declaration=True
+          )
+          PY2
+
+          echo "Android advertising permissions/metadata removed."
+
+          echo
+          echo "=== Remaining manifest ad references ==="
+
+          grep -niE \
+            'admob|google.*ads|applovin|facebook.*ads|audience.?network|AD_ID|adsidentifier' \
+            work/decoded/AndroidManifest.xml \
+            || true
 
       - name: Verify Aetherwave identity
         run: |
@@ -161,6 +309,80 @@ jobs:
           echo
           echo "Storage analysis generated."
 
+      - name: Audit AOT advertising and storage references
+        run: |
+          set -e
+
+          mkdir -p work/report
+
+          REPORT="work/report/aetherwave-audit.txt"
+
+          {
+            echo "=============================================="
+            echo " AETHERWAVE AUDIT"
+            echo "=============================================="
+            echo
+
+            echo "=== Android advertising references ==="
+
+            grep -RniE \
+              'com/google/android/gms/ads|com/applovin|com/facebook/ads|admob|applovin|audience.?network|adsidentifier' \
+              work/decoded \
+              || true
+
+            echo
+            echo "=== Flutter AOT advertising references ==="
+
+            find work/decoded \
+              -type f \
+              -name 'libapp.so' \
+              -print0 |
+            while IFS= read -r -d '' f; do
+
+              echo
+              echo "FILE: $f"
+
+              strings -a "$f" |
+                grep -Ei \
+                'admob|google_mobile_ads|applovin|facebook|audience.?network|interstitial|rewarded|banner.?ad|app.?open.?ad|ad.?unit|adsidentifier' \
+                | head -2000 \
+                || true
+
+            done
+
+            echo
+            echo "=== Flutter AOT storage/download references ==="
+
+            find work/decoded \
+              -type f \
+              -name 'libapp.so' \
+              -print0 |
+            while IFS= read -r -d '' f; do
+
+              echo
+              echo "FILE: $f"
+
+              strings -a "$f" |
+                grep -Ei \
+                '/storage/|Download/|Music/|\.mp3|\.m4a|\.flac|MediaStore|downloads' \
+                | head -2000 \
+                || true
+
+            done
+
+            echo
+            echo "=== Native libraries ==="
+
+            find work/decoded/lib \
+              -type f \
+              -name '*.so' \
+              -print \
+              | sort
+
+          } > "$REPORT"
+
+          cat "$REPORT"
+
       - name: Rebuild APK
         run: |
           set -e
@@ -186,6 +408,36 @@ jobs:
             4 \
             work/Aetherwave-debug-unsigned.apk \
             work/Aetherwave-debug.apk
+
+      - name: Verify rebuilt APK native libraries
+        run: |
+          set -e
+
+          echo "=== Rebuilt APK ==="
+          ls -lh work/Aetherwave-debug.apk
+
+          echo
+          echo "=== Native libraries inside APK ==="
+
+          unzip -l work/Aetherwave-debug.apk |
+            grep -E 'lib/[^ ]+\.so$' \
+            | head -300
+
+          COUNT="$(
+            unzip -l work/Aetherwave-debug.apk |
+              grep -Ec 'lib/[^ ]+\.so$' || true
+          )"
+
+          echo
+          echo "Native library count: $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: APK contains ZERO native libraries."
+            exit 1
+          fi
+
+          echo
+          echo "Native library verification passed."
 
       - name: Create debug keystore
         run: |
@@ -235,5 +487,5 @@ jobs:
           name: Aetherwave-debug
           path: |
             work/Aetherwave-debug.apk
-            work/report/storage-analysis.txt
+            work/report/aetherwave-audit.txt
           retention-days: 7
