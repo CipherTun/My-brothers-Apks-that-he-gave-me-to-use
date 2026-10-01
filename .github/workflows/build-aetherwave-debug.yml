@@ -9,13 +9,20 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
+
+      # ------------------------------------------------
+      # 1. Checkout
+      # ------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Locate base APK ZIP
+      # ------------------------------------------------
+      # 2. Locate and extract THE COMPLETE APK SET
+      # ------------------------------------------------
+      - name: Extract complete original APK set
         run: |
           set -e
 
@@ -31,116 +38,127 @@ jobs:
             exit 1
           fi
 
-          echo "Using: $FILE"
+          echo "Using:"
+          echo "$FILE"
 
           unzip -q "$FILE" -d work/input
 
-          APK="$(find work/input -type f -name 'base.apk' -print -quit)"
+          echo
+          echo "APK SET:"
+          find work/input \
+            -type f \
+            -name '*.apk' \
+            -print \
+            | sort
 
-          if [ -z "$APK" ]; then
-            echo "ERROR: base.apk not found inside ZIP."
+          COUNT="$(find work/input -type f -name '*.apk' | wc -l)"
+
+          echo
+          echo "APK count: $COUNT"
+
+          if [ "$COUNT" -lt 1 ]; then
+            echo "ERROR: No APKs found."
             exit 1
           fi
 
-          cp "$APK" work/base.apk
-
-          echo "Base APK:"
-          ls -lh work/base.apk
-
-      - name: Install Apktool
-        run: |
-          curl -fsSL \
-            -o /tmp/apktool.jar \
-            https://github.com/iBotPeaches/Apktool/releases/download/v3.0.2/apktool_3.0.2.jar
-
-      - name: Decode base APK
+      # ------------------------------------------------
+      # 3. Download APKEditor ONLY ON GITHUB RUNNER
+      # ------------------------------------------------
+      - name: Download APKEditor on GitHub runner
         run: |
           set -e
 
-          java -jar /tmp/apktool.jar d \
+          mkdir -p work/tools
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            -o work/tools/APKEditor.jar \
+            https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar
+
+          test -s work/tools/APKEditor.jar
+
+          echo
+          echo "APKEditor installed on GitHub runner only."
+
+          java -jar work/tools/APKEditor.jar -version
+
+      # ------------------------------------------------
+      # 4. Inspect complete APK set
+      # ------------------------------------------------
+      - name: Inspect APK set
+        run: |
+          set -e
+
+          mkdir -p work/report
+
+          echo "=== ORIGINAL APK FILES ===" \
+            > work/report/apk-set.txt
+
+          find work/input \
+            -type f \
+            -name '*.apk' \
+            -print \
+            | sort \
+            >> work/report/apk-set.txt
+
+          echo >> work/report/apk-set.txt
+
+          echo "=== APK SIZES ===" \
+            >> work/report/apk-set.txt
+
+          find work/input \
+            -type f \
+            -name '*.apk' \
+            -print0 |
+          while IFS= read -r -d '' apk; do
+            ls -lh "$apk"
+          done \
+            >> work/report/apk-set.txt
+
+          cat work/report/apk-set.txt
+
+      # ------------------------------------------------
+      # 5. MERGE ALL SPLITS
+      # ------------------------------------------------
+      - name: Merge complete APK set into standalone APK
+        run: |
+          set -e
+
+          java -jar work/tools/APKEditor.jar \
+            m \
+            -i work/input \
+            -o work/Aetherwave-merged.apk \
             -f \
-            work/base.apk \
+            -extractNativeLibs=false \
+            -validate-modules
+
+          test -s work/Aetherwave-merged.apk
+
+          echo
+          echo "MERGED APK:"
+          ls -lh work/Aetherwave-merged.apk
+
+      # ------------------------------------------------
+      # 6. Decode merged APK
+      # ------------------------------------------------
+      - name: Decode merged APK
+        run: |
+          set -e
+
+          java -jar work/tools/APKEditor.jar \
+            d \
+            -i work/Aetherwave-merged.apk \
             -o work/decoded
 
-      - name: Restore native libraries from APK splits
-        run: |
-          set -e
+          test -f work/decoded/AndroidManifest.xml
 
-          mkdir -p work/native
-
-          echo "=== APK splits ==="
-          find work/input -type f -name '*.apk' -print | sort
-
-          echo
-          echo "=== Extracting native libraries ==="
-
-          find work/input -type f -name '*.apk' -print0 |
-          while IFS= read -r -d '' apk; do
-
-            unzip -l "$apk" |
-              awk '/lib\/[^ ]+\/[^ ]+\.so$/ {print $4}' |
-              while IFS= read -r lib; do
-
-                [ -n "$lib" ] || continue
-
-                abi="$(printf '%s\n' "$lib" | cut -d/ -f2)"
-                name="$(printf '%s\n' "$lib" | cut -d/ -f3)"
-
-                mkdir -p "work/native/$abi"
-
-                unzip -p "$apk" "$lib" \
-                  > "work/native/$abi/$name"
-
-              done
-
-          done
-
-          echo
-          echo "=== Recovered native libraries ==="
-
-          find work/native \
-            -type f \
-            -name '*.so' \
-            -print | sort
-
-          test "$(find work/native -type f -name '*.so' | wc -l)" -gt 0
-
-          echo
-          echo "=== Restoring libraries into decoded APK ==="
-
-          find work/native \
-            -mindepth 1 \
-            -maxdepth 1 \
-            -type d \
-            -print0 |
-          while IFS= read -r -d '' abi_dir; do
-
-            abi="$(basename "$abi_dir")"
-
-            mkdir -p "work/decoded/lib/$abi"
-
-            cp -f \
-              "$abi_dir"/*.so \
-              "work/decoded/lib/$abi/"
-
-          done
-
-          echo
-          echo "=== Final decoded native libraries ==="
-
-          find work/decoded/lib \
-            -type f \
-            -name '*.so' \
-            -print | sort
-
-          test "$(find work/decoded/lib -type f -name '*.so' | wc -l)" -gt 0
-
+      # ------------------------------------------------
+      # 7. Change ONLY requested identity
+      # ------------------------------------------------
       - name: Apply Aetherwave identity
         run: |
           set -e
-
-          OLD='com.tubemusicdown.musictubedownallmusicdownolder'
-          NEW='com.ciphertun.aetherwave'
 
           python3 <<'PY'
           from pathlib import Path
@@ -150,247 +168,190 @@ jobs:
           old = "com.tubemusicdown.musictubedownallmusicdownolder"
           new = "com.ciphertun.aetherwave"
 
+          extensions = {
+              ".xml",
+              ".smali",
+              ".json",
+              ".txt",
+              ".properties",
+          }
+
+          replacements = {
+              old: new,
+              "Music Downloader": "Aetherwave",
+          }
+
+          changed = 0
+
           for p in root.rglob("*"):
               if not p.is_file():
                   continue
 
-              if p.suffix.lower() not in {
-                  ".xml",
-                  ".smali",
-                  ".json",
-                  ".txt"
-              }:
+              if p.suffix.lower() not in extensions:
                   continue
 
               try:
                   data = p.read_text(errors="ignore")
-                  changed = data.replace(old, new)
-                  changed = changed.replace(
-                      "Music Downloader",
-                      "Aetherwave"
-                  )
-
-                  if changed != data:
-                      p.write_text(changed)
               except Exception:
-                  pass
+                  continue
+
+              updated = data
+
+              for src, dst in replacements.items():
+                  updated = updated.replace(src, dst)
+
+              if updated != data:
+                  p.write_text(updated)
+                  changed += 1
+
+          print("Files changed:", changed)
           PY
 
-      - name: Remove Android advertising integrations
+      # ------------------------------------------------
+      # 8. Remove ad permissions/metadata
+      # ------------------------------------------------
+      - name: Remove advertising permissions and metadata
         run: |
           set -e
 
-          python3 <<'PY2'
+          python3 <<'PY'
           from pathlib import Path
-          import xml.etree.ElementTree as ET
+          import re
 
-          path = Path("work/decoded/AndroidManifest.xml")
+          p = Path("work/decoded/AndroidManifest.xml")
+          s = p.read_text(errors="ignore")
 
-          ANDROID = "http://schemas.android.com/apk/res/android"
+          permission_patterns = [
+              r'\s*<uses-permission[^>]+android\.permission\.AD_ID[^>]*/>',
+              r'\s*<uses-permission[^>]+com\.google\.android\.gms\.permission\.AD_ID[^>]*/>',
+          ]
 
-          ET.register_namespace("android", ANDROID)
+          for pattern in permission_patterns:
+              s = re.sub(pattern, '', s)
 
-          tree = ET.parse(path)
-          root = tree.getroot()
+          metadata_names = [
+              "com.google.android.gms.ads.APPLICATION_ID",
+              "com.google.android.gms.ads.AD_MANAGER_APP",
+              "com.applovin.sdk.AppLovinSdkKey",
+              "com.facebook.sdk.ApplicationId",
+              "com.facebook.sdk.ClientToken",
+          ]
 
-          def android_name(element):
-              return element.get(
-                  f"{{{ANDROID}}}name",
-                  ""
+          for name in metadata_names:
+              s = re.sub(
+                  rf'\s*<meta-data[^>]+android:name="{re.escape(name)}"[^>]*/>',
+                  '',
+                  s
               )
 
-          # Remove advertising ID permissions.
-          for child in list(root):
+          p.write_text(s)
+          PY
 
-              if child.tag != "uses-permission":
-                  continue
+          echo "Ad permissions and known ad metadata removed."
 
-              name = android_name(child)
+      # ------------------------------------------------
+      # 9. Rebuild
+      # ------------------------------------------------
+      - name: Rebuild modified standalone APK
+        run: |
+          set -e
 
-              if name in {
-                  "android.permission.AD_ID",
-                  "com.google.android.gms.permission.AD_ID",
-              }:
-                  root.remove(child)
+          java -jar work/tools/APKEditor.jar \
+            b \
+            -i work/decoded \
+            -o work/Aetherwave-debug-unsigned.apk
 
-          # Remove explicit ad metadata.
-          application = root.find("application")
+          test -s work/Aetherwave-debug-unsigned.apk
 
-          if application is not None:
+          ls -lh work/Aetherwave-debug-unsigned.apk
 
-              for child in list(application):
+      # ------------------------------------------------
+      # 10. Verify package contents
+      # ------------------------------------------------
+      - name: Verify final APK contents
+        run: |
+          set -e
 
-                  if child.tag != "meta-data":
-                      continue
+          APK="work/Aetherwave-debug-unsigned.apk"
 
-                  name = android_name(child).lower()
+          echo "=== APK CONTENTS ==="
 
-                  if any(term in name for term in (
-                      "admob",
-                      "ad_manager",
-                      "applovin",
-                      "facebook_ads",
-                      "audience_network",
-                  )):
-                      application.remove(child)
-
-          tree.write(
-              path,
-              encoding="utf-8",
-              xml_declaration=True
-          )
-          PY2
-
-          echo "Android advertising permissions/metadata removed."
+          unzip -l "$APK" |
+            grep -E \
+            'AndroidManifest.xml|classes[0-9]*\.dex|resources\.arsc|lib/.*\.so' |
+            head -300
 
           echo
-          echo "=== Remaining manifest ad references ==="
+          echo "=== NATIVE ABIS ==="
 
-          grep -niE \
-            'admob|google.*ads|applovin|facebook.*ads|audience.?network|AD_ID|adsidentifier' \
-            work/decoded/AndroidManifest.xml \
-            || true
+          unzip -l "$APK" |
+            grep -E \
+            'lib/(armeabi-v7a|arm64-v8a|x86|x86_64)/.*\.so' |
+            sort
 
+          echo
+          echo "=== DEX ==="
+
+          DEX_COUNT="$(
+            unzip -l "$APK" |
+            grep -E '[[:space:]]classes[0-9]*\.dex$' |
+            wc -l
+          )"
+
+          echo "DEX count: $DEX_COUNT"
+
+          if [ "$DEX_COUNT" -lt 1 ]; then
+            echo "ERROR: No DEX files."
+            exit 1
+          fi
+
+          echo
+          echo "=== NATIVE LIBRARY COUNT ==="
+
+          SO_COUNT="$(
+            unzip -l "$APK" |
+            grep -E 'lib/.*/.*\.so$' |
+            wc -l
+          )"
+
+          echo "Native libraries: $SO_COUNT"
+
+          if [ "$SO_COUNT" -lt 1 ]; then
+            echo "ERROR: Native libraries are missing."
+            exit 1
+          fi
+
+      # ------------------------------------------------
+      # 11. Verify identity
+      # ------------------------------------------------
       - name: Verify Aetherwave identity
         run: |
           set -e
 
-          echo "=== Manifest package ==="
+          echo "=== AETHERWAVE ==="
+
           grep -Rni \
             'com.ciphertun.aetherwave' \
             work/decoded/AndroidManifest.xml
 
           echo
-          echo "=== Checking old package ==="
+          echo "=== OLD PACKAGE CHECK ==="
 
           if grep -Rni \
             'com.tubemusicdown.musictubedownallmusicdownolder' \
-            work/decoded/AndroidManifest.xml; then
-            echo "ERROR: Old package still exists in manifest."
+            work/decoded \
+            --exclude='*.so'; then
+
+            echo "ERROR: Old package identifier remains."
             exit 1
           fi
 
           echo
           echo "Identity verification passed."
 
-      - name: Inspect existing download/storage implementation
-        run: |
-          mkdir -p work/report
-
-          echo "=== Android-side storage references ===" \
-            > work/report/storage-analysis.txt
-
-          grep -RniE \
-            'Download/|Music/|/storage/|MediaStore|FileOutputStream|RandomAccessFile|externalFilesDir' \
-            work/decoded \
-            >> work/report/storage-analysis.txt || true
-
-          echo \
-            >> work/report/storage-analysis.txt
-
-          echo "=== libapp.so storage references ===" \
-            >> work/report/storage-analysis.txt
-
-          find work/decoded \
-            -type f \
-            -name 'libapp.so' \
-            -print0 |
-          while IFS= read -r -d '' f; do
-            echo
-            echo "FILE: $f"
-
-            strings -a "$f" |
-              grep -Ei \
-              '/storage/|Download/|Music/|\.mp3|\.m4a|\.flac|MediaStore' \
-              | head -1000 || true
-          done \
-          >> work/report/storage-analysis.txt
-
-          echo
-          echo "Storage analysis generated."
-
-      - name: Audit AOT advertising and storage references
-        run: |
-          set -e
-
-          mkdir -p work/report
-
-          REPORT="work/report/aetherwave-audit.txt"
-
-          {
-            echo "=============================================="
-            echo " AETHERWAVE AUDIT"
-            echo "=============================================="
-            echo
-
-            echo "=== Android advertising references ==="
-
-            grep -RniE \
-              'com/google/android/gms/ads|com/applovin|com/facebook/ads|admob|applovin|audience.?network|adsidentifier' \
-              work/decoded \
-              || true
-
-            echo
-            echo "=== Flutter AOT advertising references ==="
-
-            find work/decoded \
-              -type f \
-              -name 'libapp.so' \
-              -print0 |
-            while IFS= read -r -d '' f; do
-
-              echo
-              echo "FILE: $f"
-
-              strings -a "$f" |
-                grep -Ei \
-                'admob|google_mobile_ads|applovin|facebook|audience.?network|interstitial|rewarded|banner.?ad|app.?open.?ad|ad.?unit|adsidentifier' \
-                | head -2000 \
-                || true
-
-            done
-
-            echo
-            echo "=== Flutter AOT storage/download references ==="
-
-            find work/decoded \
-              -type f \
-              -name 'libapp.so' \
-              -print0 |
-            while IFS= read -r -d '' f; do
-
-              echo
-              echo "FILE: $f"
-
-              strings -a "$f" |
-                grep -Ei \
-                '/storage/|Download/|Music/|\.mp3|\.m4a|\.flac|MediaStore|downloads' \
-                | head -2000 \
-                || true
-
-            done
-
-            echo
-            echo "=== Native libraries ==="
-
-            find work/decoded/lib \
-              -type f \
-              -name '*.so' \
-              -print \
-              | sort
-
-          } > "$REPORT"
-
-          cat "$REPORT"
-
-      - name: Rebuild APK
-        run: |
-          set -e
-
-          java -jar /tmp/apktool.jar b \
-            work/decoded \
-            -o work/Aetherwave-debug-unsigned.apk
-
+      # ------------------------------------------------
+      # 12. Align
+      # ------------------------------------------------
       - name: Align APK
         run: |
           set -e
@@ -409,36 +370,9 @@ jobs:
             work/Aetherwave-debug-unsigned.apk \
             work/Aetherwave-debug.apk
 
-      - name: Verify rebuilt APK native libraries
-        run: |
-          set -e
-
-          echo "=== Rebuilt APK ==="
-          ls -lh work/Aetherwave-debug.apk
-
-          echo
-          echo "=== Native libraries inside APK ==="
-
-          unzip -l work/Aetherwave-debug.apk |
-            grep -E 'lib/[^ ]+\.so$' \
-            | head -300
-
-          COUNT="$(
-            unzip -l work/Aetherwave-debug.apk |
-              grep -Ec 'lib/[^ ]+\.so$' || true
-          )"
-
-          echo
-          echo "Native library count: $COUNT"
-
-          if [ "$COUNT" -eq 0 ]; then
-            echo "ERROR: APK contains ZERO native libraries."
-            exit 1
-          fi
-
-          echo
-          echo "Native library verification passed."
-
+      # ------------------------------------------------
+      # 13. Create debug keystore ON GITHUB RUNNER
+      # ------------------------------------------------
       - name: Create debug keystore
         run: |
           set -e
@@ -457,9 +391,10 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          test -f "$HOME/.android/debug.keystore"
-
-      - name: Sign debug APK
+      # ------------------------------------------------
+      # 14. Sign
+      # ------------------------------------------------
+      - name: Sign Aetherwave debug APK
         run: |
           set -e
 
@@ -481,11 +416,52 @@ jobs:
             --verbose \
             work/Aetherwave-debug.apk
 
-      - name: Upload Aetherwave debug APK
+      # ------------------------------------------------
+      # 15. Final verification
+      # ------------------------------------------------
+      - name: Final APK verification
+        run: |
+          set -e
+
+          APK="work/Aetherwave-debug.apk"
+
+          test -s "$APK"
+
+          echo "=============================================="
+          echo " FINAL AETHERWAVE APK"
+          echo "=============================================="
+
+          ls -lh "$APK"
+
+          echo
+          echo "SHA256:"
+          sha256sum "$APK"
+
+          echo
+          echo "SIGNATURE:"
+          
+          BT="$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | sort -V \
+            | tail -1)"
+
+          "$BT/apksigner" verify \
+            --verbose \
+            "$APK"
+
+          echo
+          echo "FINAL VERIFICATION PASSED."
+
+      # ------------------------------------------------
+      # 16. Upload ONE standalone APK
+      # ------------------------------------------------
+      - name: Upload standalone Aetherwave APK
         uses: actions/upload-artifact@v4
         with:
           name: Aetherwave-debug
           path: |
             work/Aetherwave-debug.apk
-            work/report/aetherwave-audit.txt
+            work/report/apk-set.txt
           retention-days: 7
