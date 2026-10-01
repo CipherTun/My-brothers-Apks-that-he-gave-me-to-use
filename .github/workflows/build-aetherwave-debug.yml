@@ -129,7 +129,6 @@ jobs:
             -i work/input \
             -o work/Aetherwave-merged.apk \
             -f \
-            -extractNativeLibs=false \
             -validate-modules
 
           test -s work/Aetherwave-merged.apk
