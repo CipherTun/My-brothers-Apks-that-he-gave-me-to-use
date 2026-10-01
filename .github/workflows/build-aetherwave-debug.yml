@@ -261,6 +261,82 @@ jobs:
           echo "Ad permissions and known ad metadata removed."
 
       # ------------------------------------------------
+      # 9. Remove ONLY Google Play licensing/verification
+      # ------------------------------------------------
+      - name: Remove targeted Google Play licensing verification
+        run: |
+          set -e
+
+          MANIFEST="work/decoded/AndroidManifest.xml"
+
+          echo "=== REMOVING GOOGLE PLAY LICENSE PERMISSION ==="
+
+          python3 <<'PY2'
+          from pathlib import Path
+          import re
+
+          p = Path("work/decoded/AndroidManifest.xml")
+          s = p.read_text(errors="ignore")
+
+          # Remove ONLY the legacy Google Play licensing permission.
+          # Do NOT remove general Google Play Services/API permissions.
+          s = re.sub(
+              r'\\s*<uses-permission[^>]+'
+              r'(?:android\\.permission\\.CHECK_LICENSE|'
+              r'com\\.android\\.vending\\.CHECK_LICENSE)'
+              r'[^>]*/>',
+              '',
+              s,
+              flags=re.I
+          )
+
+          p.write_text(s)
+          PY2
+
+          echo
+          echo "=== TARGETED LICENSE/INTEGRITY SCAN ==="
+
+          mkdir -p work/report
+
+          REPORT="work/report/google-play-verification-scan.txt"
+
+          : > "$REPORT"
+
+          echo "=== MANIFEST LICENSE/INTEGRITY REFERENCES ===" >> "$REPORT"
+
+          grep -RniE \
+            'CHECK_LICENSE|com\\.android\\.vending\\.CHECK_LICENSE|'
+            'com\\.google\\.android\\.vending\\.licensing|'
+            'LicenseChecker|LicenseCheckerCallback|'
+            'ILicensingService|'
+            'IntegrityManager|StandardIntegrityManager|'
+            'requestIntegrityToken|prepareIntegrityToken|'
+            'showIntegrityDialog|'
+            'IntegrityTokenRequest|IntegrityDialogRequest' \
+            work/decoded \
+            --exclude='*.so' \
+            >> "$REPORT" || true
+
+          echo >> "$REPORT"
+          echo "=== GOOGLE PLAY / GOOGLE API REFERENCES ===" >> "$REPORT"
+
+          grep -RniE \
+            'com\\.google\\.android\\.play|'
+            'com\\.google\\.android\\.gms' \
+            work/decoded \
+            --exclude='*.so' \
+            >> "$REPORT" || true
+
+          cat "$REPORT"
+
+          echo
+          echo "IMPORTANT:"
+          echo "General Google APIs are intentionally NOT removed."
+          echo "Only the legacy CHECK_LICENSE permission was removed."
+          echo "Any remaining licensing/integrity implementation is reported"
+          echo "so it can be handled specifically without breaking downloader APIs."
+
+      # ------------------------------------------------
       # 9. Rebuild
       # ------------------------------------------------
       - name: Rebuild modified standalone APK
