@@ -41,17 +41,27 @@ jobs:
           echo "Using:"
           echo "$FILE"
 
-          unzip -q "$FILE" -d work/input
+          mkdir -p work/unpacked
+
+          unzip -q "$FILE" -d work/unpacked
+
+          # APKEditor expects APK files directly inside its input directory.
+          # Flatten the supplied split APK set without changing any APK contents.
+          find work/unpacked \
+            -type f \
+            -name '*.apk' \
+            -exec cp -f {} work/input/ \;
 
           echo
           echo "APK SET:"
           find work/input \
+            -maxdepth 1 \
             -type f \
             -name '*.apk' \
             -print \
             | sort
 
-          COUNT="$(find work/input -type f -name '*.apk' | wc -l)"
+          COUNT="$(find work/input -maxdepth 1 -type f -name '*.apk' | wc -l)"
 
           echo
           echo "APK count: $COUNT"
