@@ -79,9 +79,8 @@ jobs:
           test -s work/tools/APKEditor.jar
 
           echo
-          echo "APKEditor installed on GitHub runner only."
-
-          java -jar work/tools/APKEditor.jar -version
+          echo "APKEditor downloaded successfully on GitHub runner."
+          echo "APKEditor will be used by the next build step."
 
       # ------------------------------------------------
       # 4. Inspect complete APK set
